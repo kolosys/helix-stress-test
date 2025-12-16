@@ -64,10 +64,10 @@ func Default() *Config {
 			"GET:/ping",
 			"GET:/users/123",
 			"GET:/search?q=test&limit=10",
-			"GET:/items/1",
+			"GET:/items/{id}", // Dynamic ID from dataset range
 			"POST:/items",
-			"PUT:/items/1",
-			"DELETE:/items/1",
+			"PUT:/items/{id}",           // Dynamic ID from dataset range
+			"DELETE:/items/{delete_id}", // Dynamic ID from high range to avoid conflicts
 		},
 		DatasetSize: 10000, // Pre-populate with 10,000 items by default
 	}

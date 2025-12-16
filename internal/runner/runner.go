@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,12 +19,17 @@ import (
 
 // Endpoint represents a test endpoint.
 type Endpoint struct {
-	Method string
-	Path   string
-	Body   string
+	Method       string
+	Path         string
+	Body         string
+	HasDynamicID bool // True if path contains {id}, {random_id}, or {delete_id}
 }
 
 // ParseEndpoint parses an endpoint string (e.g., "GET:/users/123" or "POST:/items").
+// Supports dynamic ID placeholders: {id}, {random_id}, {delete_id}
+// - {id}: Random ID from dataset range (1 to datasetSize) - for GET/PUT operations
+// - {random_id}: Random ID from dataset range - same as {id}
+// - {delete_id}: Random ID from high range (datasetSize-1000 to datasetSize) - for DELETE operations
 func ParseEndpoint(s string) (Endpoint, error) {
 	parts := strings.SplitN(s, ":", 2)
 	if len(parts) != 2 {
@@ -40,6 +47,11 @@ func ParseEndpoint(s string) (Endpoint, error) {
 		return Endpoint{}, fmt.Errorf("invalid HTTP method: %s", method)
 	}
 
+	// Check for dynamic ID placeholders
+	hasDynamicID := strings.Contains(path, "{id}") ||
+		strings.Contains(path, "{random_id}") ||
+		strings.Contains(path, "{delete_id}")
+
 	// Generate default body for POST/PUT/PATCH
 	var body string
 	if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
@@ -47,23 +59,29 @@ func ParseEndpoint(s string) (Endpoint, error) {
 	}
 
 	return Endpoint{
-		Method: method,
-		Path:   path,
-		Body:   body,
+		Method:       method,
+		Path:         path,
+		Body:         body,
+		HasDynamicID: hasDynamicID,
 	}, nil
 }
 
 // Runner executes stress tests against a server.
 type Runner struct {
-	cfg     *config.Config
-	client  *http.Client
-	metrics *metrics.Metrics
+	cfg         *config.Config
+	client      *http.Client
+	metrics     *metrics.Metrics
+	datasetSize int
+	rng         *rand.Rand
+	rngMu       sync.Mutex
 }
 
 // New creates a new Runner.
 func New(cfg *config.Config, m *metrics.Metrics) *Runner {
 	return &Runner{
-		cfg: cfg,
+		cfg:         cfg,
+		datasetSize: cfg.DatasetSize,
+		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 		client: &http.Client{
 			Timeout: cfg.Timeout,
 			Transport: &http.Transport{
@@ -246,16 +264,73 @@ func (r *Runner) worker(ctx context.Context, endpoints []Endpoint, ticker <-chan
 	}
 }
 
+// getRandomID returns a random ID from the safe range for GET/PUT operations.
+// Uses IDs from 1 to (datasetSize-1000) to avoid conflicts with DELETE operations
+// which use the high range (datasetSize-1000 to datasetSize).
+func (r *Runner) getRandomID() int {
+	r.rngMu.Lock()
+	defer r.rngMu.Unlock()
+	
+	if r.datasetSize <= 1000 {
+		// If dataset is small, use full range
+		if r.datasetSize <= 0 {
+			return 1
+		}
+		return r.rng.Intn(r.datasetSize) + 1
+	}
+	// Use safe range: 1 to (datasetSize - 1000)
+	safeRange := r.datasetSize - 1000
+	return r.rng.Intn(safeRange) + 1
+}
+
+// getDeleteID returns a random ID from the high range for DELETE operations.
+// Uses IDs from (datasetSize-1000) to datasetSize to avoid conflicts with GET/PUT.
+func (r *Runner) getDeleteID() int {
+	r.rngMu.Lock()
+	defer r.rngMu.Unlock()
+	
+	if r.datasetSize <= 1000 {
+		// If dataset is small, use the last item
+		if r.datasetSize <= 0 {
+			return 1
+		}
+		return r.datasetSize
+	}
+	// Use high range: (datasetSize - 1000) to datasetSize
+	start := r.datasetSize - 1000
+	return start + r.rng.Intn(1000) + 1
+}
+
+// resolvePath replaces dynamic ID placeholders in the path with actual IDs.
+func (r *Runner) resolvePath(path string) string {
+	if strings.Contains(path, "{delete_id}") {
+		id := r.getDeleteID()
+		path = strings.ReplaceAll(path, "{delete_id}", strconv.Itoa(id))
+	}
+	if strings.Contains(path, "{id}") || strings.Contains(path, "{random_id}") {
+		id := r.getRandomID()
+		path = strings.ReplaceAll(path, "{id}", strconv.Itoa(id))
+		path = strings.ReplaceAll(path, "{random_id}", strconv.Itoa(id))
+	}
+	return path
+}
+
 // makeRequest makes a single HTTP request and records metrics.
 func (r *Runner) makeRequest(ctx context.Context, ep Endpoint) {
 	start := time.Now()
+
+	// Resolve dynamic IDs in path
+	path := ep.Path
+	if ep.HasDynamicID {
+		path = r.resolvePath(ep.Path)
+	}
 
 	// Construct URL - handle both ":8080" and "localhost:8080" formats
 	addr := r.cfg.ServerAddr
 	if strings.HasPrefix(addr, ":") {
 		addr = "localhost" + addr
 	}
-	url := "http://" + addr + ep.Path
+	url := "http://" + addr + path
 
 	var body io.Reader
 	if ep.Body != "" {

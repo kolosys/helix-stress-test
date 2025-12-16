@@ -37,7 +37,7 @@ func main() {
 
 	// Get log file path before starting server
 	logFilePath := server.GetLogFilePath(string(cfg.TestType))
-	
+
 	// Start server in background
 	serverCtx, serverCancel := context.WithCancel(ctx)
 	var serverWg sync.WaitGroup
@@ -121,7 +121,7 @@ func main() {
 	// Shutdown server
 	serverCancel()
 	serverWg.Wait()
-	
+
 	// Close log file
 	if logCleanup != nil {
 		if err := logCleanup(); err != nil {
